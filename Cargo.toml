@@ -1,0 +1,13 @@
+[package]
+name = "apk-yara-checker"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+yara = "0.15.0"
+zip = "0.6.2"
+clap = "2.33.3"
+threadpool = "1.8.1"
+walkdir = "2"
