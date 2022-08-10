@@ -1,25 +1,57 @@
 
+use std::io::{Read, Write, Cursor};
 use walkdir::WalkDir;
 
 enum ProcessedFile {
     Done(),
 }
 
-fn compile_rules(rules_path: &str) -> Result<yara::Rules, yara::errors::YaraError> {
+fn compile_rules_to_vec(rules: &str) -> Result<Vec<u8>, &str> {
     let mut compiler = yara::Compiler::new().unwrap();
-    compiler = compiler.add_rules_file(rules_path).unwrap();
-    compiler.compile_rules()
+    compiler = compiler.add_rules_file(rules).unwrap();
+    match compiler.compile_rules() {
+        Ok(mut rules) => { 
+            let mut out_vec = Vec::new();
+            let mut s = Cursor::new(Vec::new());
+            rules.save_to_stream(s.get_mut());
+            s.read_to_end(&mut out_vec);
+            return Ok(out_vec);
+        },
+        Err(e) => { return Err("Error compiling rules!"); },
+    }
 }
 
-fn process_apk(file_path: &str /*, rules: yara::Rules*/) {
+fn load_rules_from_vec(rules: Vec<u8>) -> Result<yara::Rules, &'static str> {
+    let mut s = Cursor::new(rules);
+    match yara::Rules::load_from_stream(s) {
+        Ok(mut rls) => { 
+            return Ok(rls);
+        },
+        Err(e) => { return Err("Error loading rules!"); },
+    }
+}
+
+fn process_apk(file_path: &str, rules: Vec<u8>) {
     let fname = std::path::Path::new(file_path);
     if let Ok(apk_file) = std::fs::File::open(file_path) {
         if let Ok(mut archive) = zip::ZipArchive::new(apk_file) {
             for i in 0..archive.len() {
-                let file = archive.by_index_raw(i).unwrap();
-                if file.name().ends_with(".dex") {
-                    println!("Found dex file {} in {}", file.name(), file_path);
-                    //rules.scan_mem();
+                let mut is_dex = false;
+                {
+                    let com_file = archive.by_index_raw(i).unwrap();
+                    is_dex = com_file.name().ends_with(".dex");
+                }
+                if is_dex {
+                    let mut decom_file = archive.by_index(i).unwrap();
+                    let mut file_buff = Vec::with_capacity(1000000 * 20);
+                    decom_file.read_to_end(&mut file_buff);
+                    if let Ok(com_rules) = load_rules_from_vec(rules.clone()) {
+                        if let Ok(matches) = com_rules.scan_mem(&file_buff, 60) {
+                            println!("{} in {} -> Matches: {}", decom_file.name(), file_path, matches.len());
+                        }
+                    } else {
+                        println!("Error: Unable to compile rules!");
+                    }
                 }
             }
         } else {
@@ -30,7 +62,7 @@ fn process_apk(file_path: &str /*, rules: yara::Rules*/) {
     }
 }
 
-fn process_folder(path: &str, threads: usize) {
+fn process_folder(path: &str, threads: usize, rules: Vec<u8>) {
     let pool = threadpool::ThreadPool::new(threads);
     let (tx, rx) = std::sync::mpsc::channel::<ProcessedFile>();
     let mut file_counter = 0;
@@ -41,9 +73,9 @@ fn process_folder(path: &str, threads: usize) {
             if entry.file_type().is_file() {
                 let entry_path = entry.path().to_str().unwrap().to_string();
                 let tx = tx.clone();
+                let rls = rules.clone();
                 pool.execute(move|| {
-                    // TODO: process apk
-                    process_apk(&entry_path);
+                    process_apk(&entry_path, rls);
                     tx.send(ProcessedFile::Done());
                 });
                 file_counter += 1;
@@ -95,19 +127,22 @@ fn main() {
 
     let threads: usize = args.value_of("threads").unwrap_or("4").parse().unwrap();
 
-    let mut rules: Option<yara::Rules> = None;
+    let mut rules: Option<Vec<u8>> = None;
     if let Some(rules_file) = args.value_of("rules") {
-        match compile_rules(rules_file) {
+        match compile_rules_to_vec(rules_file) {
             Ok(rs) => { rules = Some(rs) },
             Err(e) => { println!("Error: {}", e) }
         }
     } else {
         println!("ERROR: You must provide path to yara rules file using '-r' argument!");
+        return;
     }
     
     if let Some(path) = args.value_of("path") {
         println!("Processing files in {}", path);
-        process_folder(path, threads);
+        if let Some(rls) = rules {
+            process_folder(path, threads, rls);
+        }
     } else {
         println!("ERROR: You must provide path to folder with files to check using '-p' argument!");
     }
