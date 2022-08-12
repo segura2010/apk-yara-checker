@@ -1,5 +1,5 @@
 
-use std::io::{Read, Write, Cursor};
+use std::io::{Read, Cursor};
 use walkdir::WalkDir;
 
 enum ProcessedFile {
@@ -7,36 +7,39 @@ enum ProcessedFile {
 }
 
 fn parse_file_extension_filter(extensions: &str) -> Vec<String> {
-    extensions.split(",").map(str::to_string).collect()
+    extensions.split(',').map(str::to_string).collect()
 }
 
-fn compile_rules_to_vec(rules: &str) -> Result<Vec<u8>, &str> {
+fn compile_rules_to_vec(rules: &str) -> Result<Vec<u8>, String> {
     let mut compiler = yara::Compiler::new().unwrap();
     compiler = compiler.add_rules_file(rules).unwrap();
     match compiler.compile_rules() {
         Ok(mut rules) => { 
             let mut out_vec = Vec::new();
             let mut s = Cursor::new(Vec::new());
-            rules.save_to_stream(s.get_mut());
-            s.read_to_end(&mut out_vec);
-            return Ok(out_vec);
+            if let Err(e) = rules.save_to_stream(s.get_mut()) {
+                return Err(format!("Error saving rules to stream! {}", e));
+            }
+            if let Err(e) = s.read_to_end(&mut out_vec) {
+                return Err(format!("Error saving rules to stream! {}", e));
+            }
+            Ok(out_vec)
         },
-        Err(e) => { return Err("Error compiling rules!"); },
+        Err(e) => { Err(format!("Error compiling rules! {}", e)) },
     }
 }
 
-fn load_rules_from_vec(rules: Vec<u8>) -> Result<yara::Rules, &'static str> {
-    let mut s = Cursor::new(rules);
+fn load_rules_from_vec(rules: Vec<u8>) -> Result<yara::Rules, String> {
+    let s = Cursor::new(rules);
     match yara::Rules::load_from_stream(s) {
-        Ok(mut rls) => { 
-            return Ok(rls);
+        Ok(rls) => { 
+            Ok(rls)
         },
-        Err(e) => { return Err("Error loading rules!"); },
+        Err(e) => { Err(format!("Error loading rules! {}", e)) },
     }
 }
 
 fn process_apk(file_path: &str, rules: Vec<u8>, extension_filters: Vec<String>) {
-    let fname = std::path::Path::new(file_path);
     if let Ok(apk_file) = std::fs::File::open(file_path) {
         if let Ok(mut archive) = zip::ZipArchive::new(apk_file) {
             for i in 0..archive.len() {
@@ -53,12 +56,13 @@ fn process_apk(file_path: &str, rules: Vec<u8>, extension_filters: Vec<String>) 
                 if match_extension {
                     let mut decom_file = archive.by_index(i).unwrap();
                     let mut file_buff = Vec::with_capacity(1000000 * 20);
-                    decom_file.read_to_end(&mut file_buff);
-                    if let Ok(com_rules) = load_rules_from_vec(rules.clone()) {
-                        if let Ok(matches) = com_rules.scan_mem(&file_buff, 60) {
-                            let matched_rules: Vec<&str> = matches.iter().map(|r| r.identifier).collect();
-                            println!("{} in {} -> Matches: {}. Rules: {:?}.", decom_file.name(), file_path, matches.len(), matched_rules);
-                        }
+                    if let Err(e) = decom_file.read_to_end(&mut file_buff) {
+                        println!("Error: {}", e);
+                    } else if let Ok(com_rules) = load_rules_from_vec(rules.clone()) {
+                            if let Ok(matches) = com_rules.scan_mem(&file_buff, 60) {
+                                let matched_rules: Vec<&str> = matches.iter().map(|r| r.identifier).collect();
+                                println!("{} in {} -> Matches: {}. Rules: {:?}.", decom_file.name(), file_path, matches.len(), matched_rules);
+                            }
                     } else {
                         println!("Error: Unable to compile rules!");
                     }
@@ -79,7 +83,6 @@ fn process_folder(path: &str, threads: usize, rules: Vec<u8>, extension_filters:
 
     for entry in WalkDir::new(path) {
         if let Ok(entry) = entry {
-            let filename = entry.file_name().to_str().unwrap();
             if entry.file_type().is_file() {
                 let entry_path = entry.path().to_str().unwrap().to_string();
                 let tx = tx.clone();
@@ -103,11 +106,9 @@ fn process_folder(path: &str, threads: usize, rules: Vec<u8>, extension_filters:
                     ProcessedFile::Done() => {
                         processed_files += 1;
                     },
-                    _ => {
-                    },
                 }
             },
-            Err(e) => {},
+            Err(_) => {},
         }
 
         if processed_files >= file_counter {
