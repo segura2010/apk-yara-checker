@@ -10,28 +10,20 @@ fn parse_file_extension_filter(extensions: &str) -> Vec<String> {
     extensions.split(',').map(str::to_string).collect()
 }
 
-fn compile_rules_to_vec(rules: &str) -> Result<Vec<u8>, String> {
-    let mut compiler = yara::Compiler::new().unwrap();
-    compiler = compiler.add_rules_file(rules).unwrap();
-    match compiler.compile_rules() {
-        Ok(mut rules) => { 
-            let mut out_vec = Vec::new();
-            let mut s = Cursor::new(Vec::new());
-            if let Err(e) = rules.save_to_stream(s.get_mut()) {
-                return Err(format!("Error saving rules to stream! {}", e));
-            }
-            if let Err(e) = s.read_to_end(&mut out_vec) {
-                return Err(format!("Error saving rules to stream! {}", e));
-            }
-            Ok(out_vec)
-        },
-        Err(e) => { Err(format!("Error compiling rules! {}", e)) },
+fn compile_rules_to_vec(rules_file: &str) -> Result<Vec<u8>, String> {
+    let rules = std::fs::read(rules_file).unwrap();
+    let mut compiler = yara_x::Compiler::new();
+    compiler.add_source(rules.as_slice()).unwrap();
+    let rules = compiler.build();
+    match rules.serialize() {
+        Ok(rs) => { return Ok(rs); },
+        Err(e) => { return Err(format!("Error saving rules to stream! {}", e)); },
     }
 }
 
-fn load_rules_from_vec(rules: Vec<u8>) -> Result<yara::Rules, String> {
+fn load_rules_from_vec(rules: Vec<u8>) -> Result<yara_x::Rules, String> {
     let s = Cursor::new(rules);
-    match yara::Rules::load_from_stream(s) {
+    match yara_x::Rules::deserialize_from(s) {
         Ok(rls) => { 
             Ok(rls)
         },
@@ -59,10 +51,11 @@ fn process_apk(file_path: &str, rules: Vec<u8>, extension_filters: Vec<String>) 
                     if let Err(e) = decom_file.read_to_end(&mut file_buff) {
                         println!("Error: {}", e);
                     } else if let Ok(com_rules) = load_rules_from_vec(rules.clone()) {
-                            if let Ok(matches) = com_rules.scan_mem(&file_buff, 60) {
-                                let matched_rules: Vec<&str> = matches.iter().map(|r| r.identifier).collect();
-                                println!("{} in {} -> Matches: {}. Rules: {:?}.", decom_file.name(), file_path, matches.len(), matched_rules);
-                            }
+                        let mut scanner = yara_x::Scanner::new(&com_rules);
+                        if let Ok(result) = scanner.scan(&file_buff) {
+                            let matched_rules: Vec<&str> = result.matching_rules().map(|r| r.identifier()).collect();
+                            println!("{} in {} -> Matches: {}. Rules: {:?}.", decom_file.name(), file_path, result.matching_rules().len(), matched_rules);
+                        }
                     } else {
                         println!("Error: Unable to compile rules!");
                     }
@@ -90,7 +83,7 @@ fn process_folder(path: &str, threads: usize, rules: Vec<u8>, extension_filters:
                 let ext_fil = extension_filters.clone();
                 pool.execute(move|| {
                     process_apk(&entry_path, rls, ext_fil);
-                    tx.send(ProcessedFile::Done());
+                    let _ = tx.send(ProcessedFile::Done());
                 });
                 file_counter += 1;
             }
